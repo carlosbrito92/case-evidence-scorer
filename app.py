@@ -154,6 +154,8 @@ if "api_key_validated" not in st.session_state:
     st.session_state.api_key_validated = False
 if "anthropic_api_key" not in st.session_state:
     st.session_state.anthropic_api_key = ""
+if "form_version" not in st.session_state:
+    st.session_state.form_version = 0
 
 if not st.session_state.api_key_validated:
     # Centered login screen
@@ -406,35 +408,57 @@ col_left, col_right = st.columns([1, 1], gap="large")
 with col_left:
     st.markdown('<div class="section-title">📥 Machine Data Input</div>', unsafe_allow_html=True)
 
+    v = st.session_state.form_version  # shorthand for keying widgets
+
     with st.expander("**Machine IDs & Status**", expanded=True):
-        machine_id = st.text_input("Machine ID", placeholder="e.g. 81300160")
+        machine_id = st.text_input("Machine ID", placeholder="e.g. 81300160", key=f"machine_id_{v}")
         event_classification = st.selectbox(
             "Last Event Classification",
-            ["Unlicensed", "Commercial", "Evaluation", "Personal", "Unknown"]
+            ["Unlicensed", "Commercial", "Evaluation", "Personal", "Unknown"],
+            key=f"event_class_{v}"
         )
-        last_event_date = st.date_input("Last Event Date")
+        last_event_date = st.date_input("Last Event Date", key=f"last_event_{v}")
 
     with st.expander("**Network & Identity Data**", expanded=True):
-        email_domain = st.text_input("Email / Actionable Domain", placeholder="e.g. palaciopontoalto.com.br")
-        ip_location = st.text_input("IP Location (city, state)", placeholder="e.g. Ituiutaba, MG")
-        wifi_location = st.text_input("Wi-Fi Location (city, state)", placeholder="e.g. Ituiutaba, MG")
-        hostname = st.text_input("Hostname", placeholder="e.g. PALACIO-PC01")
-        username = st.text_input("Username", placeholder="e.g. giseli.lima")
+        email_domain = st.text_input("Email / Actionable Domain", placeholder="e.g. palaciopontoalto.com.br", key=f"domain_{v}")
+        ip_location = st.text_input("IP Location (city, state)", placeholder="e.g. Ituiutaba, MG", key=f"ip_{v}")
+        wifi_location = st.text_input("Wi-Fi Location (city, state)", placeholder="e.g. Ituiutaba, MG", key=f"wifi_{v}")
+        hostname = st.text_input("Hostname", placeholder="e.g. PALACIO-PC01", key=f"hostname_{v}")
+        username = st.text_input("Username", placeholder="e.g. giseli.lima", key=f"username_{v}")
         additional_emails = st.text_area("Additional Email Addresses (one per line)", height=80,
-                                          placeholder="bruna@palaciopontoalto.com.br\ncontato@example.com.br")
+                                          placeholder="bruna@palaciopontoalto.com.br\ncontato@example.com.br",
+                                          key=f"add_emails_{v}")
 
     with st.expander("**Entity Identifiers (optional, for auto-lookup)**"):
-        cnpj_input = st.text_input("CNPJ (will be auto-verified via ReceitaWS)", placeholder="00.000.000/0001-00")
-        company_name_hint = st.text_input("Company name hint (for Google Dorks)", placeholder="Palácio Ponto Alto Eventos")
+        cnpj_input = st.text_input("CNPJ (will be auto-verified via ReceitaWS)", placeholder="00.000.000/0001-00", key=f"cnpj_{v}")
+        company_name_hint = st.text_input("Company name hint (for Google Dorks)", placeholder="Palácio Ponto Alto Eventos", key=f"company_{v}")
 
     st.markdown('<div class="section-title" style="margin-top:20px;">📝 Additional Findings</div>', unsafe_allow_html=True)
-    additional_findings = st.text_area(
-        "Paste your OSINT findings here (LinkedIn, Facebook, Wayback, etc.)",
-        height=160,
-        placeholder="e.g.\n- LinkedIn company page found: linkedin.com/company/...\n- Wayback confirms site active since 2018\n- Facebook page shows same address as CNPJ registry..."
+
+    # Social media links field (new — feeds into .txt export)
+    social_media_links = st.text_area(
+        "Social Media Links (one per line)",
+        height=80,
+        placeholder="https://www.instagram.com/palaciopontoaltoeventos/\nhttps://www.facebook.com/palaciopontoaltoeventos/",
+        key=f"social_{v}"
     )
 
-    run_btn = st.button("🔎 Run Investigation", type="primary", use_container_width=True)
+    additional_findings = st.text_area(
+        "Additional OSINT Findings (LinkedIn, Wayback, notes, etc.)",
+        height=120,
+        placeholder="e.g.\n- Wayback confirms site active since 2018\n- Facebook page shows same address as CNPJ registry...",
+        key=f"findings_{v}"
+    )
+
+    col_run, col_new = st.columns([3, 1])
+    with col_run:
+        run_btn = st.button("🔎 Run Investigation", type="primary", use_container_width=True)
+    with col_new:
+        new_case_btn = st.button("🗑️ New Case", use_container_width=True)
+
+    if new_case_btn:
+        st.session_state.form_version += 1
+        st.rerun()
 
 # ─────────────────────────────────────────
 #  RESULTS PANEL
@@ -560,53 +584,90 @@ if run_btn:
                 st.markdown("---")
                 st.markdown('<div class="section-title">💾 Export</div>', unsafe_allow_html=True)
 
+                # Extract CNPJ fields from verified data
+                cnpj_legal_name   = cnpj_data.get("nome", "N/A")
+                cnpj_fantasy_name = cnpj_data.get("fantasia", "N/A")
+                cnpj_address      = ", ".join(filter(None, [
+                    cnpj_data.get("logradouro"), cnpj_data.get("numero"),
+                    cnpj_data.get("bairro"), cnpj_data.get("municipio"),
+                    cnpj_data.get("uf"), cnpj_data.get("cep")
+                ])) or "N/A"
+                cnpj_email        = cnpj_data.get("email", "N/A")
+                cnpj_phone        = cnpj_data.get("telefone", "N/A")
+                cnpj_status       = cnpj_data.get("situacao", "N/A")
+                cnpj_partners     = cnpj_data.get("qsa", [])
+                cnpj_partner_str  = ", ".join(
+                    [p.get("nome", "") for p in cnpj_partners]
+                ) if cnpj_partners else "N/A"
+                cnpj_source_url   = cnpj_data.get("_source_url", "N/A")
+
+                # Extract WHOIS fields
+                whois_registrant  = (
+                    whois_data.get("registrant_name") or
+                    whois_data.get("owner") or
+                    whois_data.get("registrant", {}).get("name", "N/A")
+                    if isinstance(whois_data.get("registrant"), dict)
+                    else whois_data.get("registrant", "N/A")
+                )
+                whois_contact     = (
+                    whois_data.get("registrant_email") or
+                    whois_data.get("emails") or
+                    "N/A"
+                )
+                if isinstance(whois_contact, list):
+                    whois_contact = ", ".join(whois_contact)
+                whois_source_url  = whois_data.get("_source_url", "N/A")
+
                 export_lines = [
-                    "[CASE EVIDENCE SCORER - EXPORT]",
-                    f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+                    f"the new investigation is {email_domain}",
                     "",
-                    "--- MACHINE DATA ---",
-                    f"Machine ID   : {machine_id or 'N/A'}",
-                    f"Domain       : {email_domain}",
-                    f"Hostname     : {hostname or 'N/A'}",
-                    f"Username     : {username or 'N/A'}",
-                    f"IP Location  : {ip_location or 'N/A'}",
-                    f"Wi-Fi Loc.   : {wifi_location or 'N/A'}",
-                    f"Last Event   : {event_classification} ({last_event_date})",
+                    f"here's the whois results: {whois_source_url}",
+                    f"Titular Name    : {whois_registrant}",
+                    f"Titular Contact : {whois_contact}",
                     "",
+                    "company social media links:",
+                ]
+
+                if social_media_links.strip():
+                    for link in social_media_links.strip().split("\n"):
+                        export_lines.append(f"  {link.strip()}")
+                else:
+                    export_lines.append("  N/A")
+
+                export_lines += [
+                    "",
+                    f"corporate taxpayer ID information: {cnpj_source_url}",
+                    f"Legal Name      : {cnpj_legal_name}",
+                    f"Fantasy Name    : {cnpj_fantasy_name}",
+                    f"Address         : {cnpj_address}",
+                    f"Email           : {cnpj_email}",
+                    f"Contact Phone   : {cnpj_phone}",
+                    f"Managing Partner: {cnpj_partner_str}",
+                    f"Status          : {cnpj_status}",
+                    "",
+                ]
+
+                if additional_findings.strip():
+                    export_lines += [
+                        "additional findings:",
+                        additional_findings.strip(),
+                        "",
+                    ]
+
+                export_lines += [
                     "--- VERDICT ---",
                     f"{verdict} | Confidence: {confidence}",
                     "",
                     "--- REASONS ---",
                     parsed.get("reasons", "N/A"),
-                    "",
                 ]
-
-                if parsed.get("missing"):
-                    export_lines += [
-                        "--- MISSING EVIDENCE ---",
-                        parsed["missing"],
-                        "",
-                    ]
 
                 if parsed.get("notes"):
                     export_lines += [
+                        "",
                         "--- ANALYST NOTES ---",
                         parsed["notes"],
-                        "",
                     ]
-
-                if additional_findings:
-                    export_lines += [
-                        "--- INVESTIGATOR FINDINGS ---",
-                        additional_findings,
-                        "",
-                    ]
-
-                export_lines += [
-                    "--- SOURCES (all publicly verifiable) ---",
-                    f"WHOIS : {whois_data.get('_source_url', 'N/A')} | Verified: {whois_data.get('_verified', False)}",
-                    f"CNPJ  : {cnpj_data.get('_source_url', 'N/A')} | Verified: {cnpj_data.get('_verified', False)}",
-                ]
 
                 export_txt = "\n".join(export_lines)
                 filename = f"case_{machine_id or 'unknown'}_{email_domain}_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.txt"
