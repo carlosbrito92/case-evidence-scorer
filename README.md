@@ -97,14 +97,13 @@ Output: APPROVED / REJECTED / INCONCLUSIVE
 
 **APPROVED** when:
 - Valid actionable domain associated with a real, identifiable entity
-- Recent events classified as "Unlicensed" (post-2022)
+- Recent events based on the current year
 - Geolocation / IP / Wi-Fi consistent with entity address
-- Hostname or username directly linked to the company
+- Hostname or username directly linked to the company or partner/employee
 
 **REJECTED** when:
-- Last event older than required (before 2022)
 - Email domain / computer domain mismatch
-- Last events classified as Commercial, Evaluation, or Personal
+
 
 ---
 
@@ -112,7 +111,7 @@ Output: APPROVED / REJECTED / INCONCLUSIVE
 
 - [ ] Auto-scrape LinkedIn company page (name, address, headcount)
 - [ ] Hunter.io / Apollo.io free API integration for contact discovery
-- [ ] Export verdict directly to dossier-ready `.docx`
+- [ ] Export verdict directly to dossier-ready `.txt`
 - [ ] Batch processing: run multiple machine IDs at once
 - [ ] Case history log (SQLite)
 
