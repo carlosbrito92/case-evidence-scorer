@@ -7,26 +7,24 @@
 
 ## What This Does
 
-A browser-based investigation assistant that helps analysts determine whether a machine case should be **APPROVED** or **REJECTED** in software piracy investigations.
+A browser-based investigation assistant that helps analysts determine whether a case should be **APPROVED** or **REJECTED** in software compliance investigations.
 
-Instead of manually searching multiple databases and trying to mentally connect the dots, the tool:
+The tool automates the most time-consuming parts of the process:
 
-1. **Auto-queries WHOIS** for the actionable domain (via public API — no auth needed)
-2. **Auto-verifies CNPJ** against Brazil's ReceitaWS public database
-3. **Searches the web autonomously** (via Claude's web search) for social media handles, email addresses, and public presence tied to the domain and usernames
-4. **Generates Google Dork queries** based on machine data (hostname, username, domain, emails)
-5. **Generates direct links** to Receita Federal, Casa dos Dados, Cadastro Empresa, Wayback Machine
-6. **Sends all evidence to Claude** for structured analysis
-7. **Returns a verdict** (APPROVED / REJECTED / INCONCLUSIVE) with confidence score and reasons
-8. **Logs every source** with its URL so any finding can be independently replicated
-9. **Exports a structured .txt report** ready to be pasted into Gemini for dossier generation
+1. **Auto-queries WHOIS** for the actionable domain (public API — no auth needed)
+2. **Auto-verifies corporate registration** against Brazil's ReceitaWS public database
+3. **Cross-correlates all evidence internally** — a data point is only accepted if confirmed by at least one independent source
+4. **Identifies probable identity matches** across partial names, email handles, and usernames
+5. **Validates domain ownership** — flags generic/shared domains (Gmail, Outlook, etc.) that cannot be legally attributed to the entity
+6. **Generates Google Dork queries** and direct verification links
+7. **Returns a structured verdict** (APPROVED / REJECTED / INCONCLUSIVE) with confidence score, corroboration map, and reasons
+8. **Exports a structured .txt report** ready for dossier generation
 
 ---
 
 ## Why Source Transparency Matters
 
-All evidence produced by this tool is traceable to a public, verifiable URL.  
-No AI-generated CNPJs. No hallucinated domains. No invented data.
+All evidence is traceable to a public, verifiable URL. No AI-generated registration numbers, no hallucinated domains, no invented data.
 
 This is critical for legal defensibility: any finding can be reproduced by a third party (QA, legal team, client) without access to any internal system.
 
@@ -35,35 +33,53 @@ This is critical for legal defensibility: any finding can be reproduced by a thi
 ## Features
 
 ### 🔐 API Key Login Screen
-Each user enters their own Anthropic API key on first access. The key is used only for that session and never stored. A quick validation call confirms the key works before granting access.
+Each user enters their own Anthropic API key on first access. Used only during that session, never stored.
 
 ### 📊 Real-Time Usage Counter
-A live counter in the sidebar tracks — per session:
-- Number of investigations run
-- Input and output tokens consumed
-- Estimated cost in USD (based on Claude Sonnet pricing)
+Tracks per session: number of investigations, input/output tokens, and estimated cost in USD. Each investigation also shows its individual cost in the status bar.
 
-Each individual investigation also shows its token count and cost in the status bar after completing.
+### ⚙️ Web Search Toggle
+A sidebar toggle switches between two analysis modes:
+- **Internal only** (~$0.02/case) — Claude cross-correlates the provided data with no external calls
+- **Web search on** (~$0.15–0.25/case) — Claude actively searches for social media profiles and public presence
 
 ### ☑️ "Mark as Absent" Fields
-Fields that may not always be available (IP location, Wi-Fi location, hostname, username, additional emails) each have a **Mark as absent** checkbox. When checked, the field is replaced with an "Information Absent" indicator and Claude is instructed not to penalize the case for missing data.
+Fields that may not always be available (IP location, Wi-Fi location, hostname, username, emails) each have a **Mark as absent** checkbox. Claude is instructed not to penalize the case for unavailable data.
 
 ### 🔢 Multiple Values per Field
-Machine IDs, Hostnames, and Usernames now accept multiple values separated by a comma and space. Claude evaluates each Machine ID individually when event classifications differ across machines.
+Entity IDs, hostnames, and usernames accept multiple comma-separated values. Claude evaluates each one individually when event classifications differ.
 
-### 📍 IP and Wi-Fi Location as Coordinates
-IP Location and Wi-Fi Location fields accept **latitude, longitude coordinates** (e.g. `-18.9186, -48.2772`) instead of city names, allowing for more precise geolocation matching against the entity's registered address.
+### 📍 Location as Coordinates
+IP Location and Wi-Fi Location fields accept **latitude, longitude coordinates** for precise geolocation matching against the entity's registered address.
 
-### 🤖 Claude Searches Autonomously
-Claude has web search enabled during each investigation. Before issuing a verdict, it actively searches for:
-- Social media profiles tied to the actionable domain
-- Public profiles for listed usernames
-- Contact or company info tied to additional email addresses
+### 🧠 Internal Cross-Correlation Engine
+Claude applies structured reasoning to every data point:
 
-Results appear in a dedicated **Social Media Found by Claude** section and are automatically included in the exported .txt.
+- **Name token matching** — splits names into individual tokens and compares them across all sources (WHOIS registrant, corporate registry partners, usernames, email handles, investigator notes)
+- **Email handle decoding** — decodes compressed email handles into name fragments (e.g. `anamartenicodemos` → `[ana][marte][nicodemos]`) and cross-references each fragment against known names
+- **Probable identity matching** — when 2+ tokens overlap across independent sources, flags as PROBABLE MATCH with full reasoning chain
+- **Domain validation** — generic/shared email providers are flagged and rejected unless publicly corroborated
+- **Email usage restriction** — additional case emails are used only for name corroboration, never as contact evidence
+
+### 📋 Approval / Rejection Logic
+
+**APPROVED** when all of:
+- Actionable domain is proprietary (entity-owned), or generic domain publicly corroborated
+- At least one verifiable contact method exists: phone number OR official email
+- Recent unlicensed events (post-2022)
+- Geolocation consistent with registered address
+- Identity corroborated or probably matched
+
+**Exception**: entity with no corporate registration but active, verifiable social media presence may still be approved if all other criteria are met.
+
+**REJECTED** when any one of:
+- Last event before 2022
+- Domain/computer domain mismatch
+- Events classified as Commercial, Evaluation, or Personal
+- Generic domain with no public corroboration
+- No verifiable phone number AND no verifiable official email
 
 ### 💾 Structured .txt Export
-The exported report follows a fixed format ready for Gemini dossier generation:
 
 ```
 the new investigation is [domain]
@@ -72,8 +88,10 @@ here's the whois results: [source URL]
 Titular Name    : ...
 Titular Contact : ...
 
+company website: [official URL or database link if no site found]
+
 company social media links:
-  [links found manually + by Claude, deduplicated]
+  ...
 
 corporate taxpayer ID information: [source URL]
 Legal Name      : ...
@@ -90,8 +108,10 @@ Status          : ...
 --- API USAGE ---
 ```
 
+If no official website or social media is found, the company website field defaults to the database source URL (Cadastro Empresa, Casa dos Dados, etc.) where the entity was located.
+
 ### 🗑️ New Case Button
-Clears all form fields instantly without reloading the page, ready for the next investigation.
+Clears all fields instantly without reloading the page.
 
 ---
 
@@ -101,8 +121,8 @@ Clears all form fields instantly without reloading the page, ready for the next 
 |---|---|
 | Interface | Streamlit |
 | AI Analysis | Anthropic Claude API (claude-sonnet) |
-| Web Search | Claude web_search tool (built-in) |
-| CNPJ Verification | ReceitaWS public API |
+| Web Search (optional) | Claude web_search tool |
+| Corporate Registry | ReceitaWS public API |
 | WHOIS Lookup | WhoisJSON public API |
 | Language | Python 3.10+ |
 
@@ -110,17 +130,10 @@ Clears all form fields instantly without reloading the page, ready for the next 
 
 ## Setup
 
-### 1. Clone and install
-
 ```bash
 git clone https://github.com/carlosbrito92/case-evidence-scorer.git
 cd case-evidence-scorer
 pip install -r requirements.txt
-```
-
-### 2. Run
-
-```bash
 streamlit run app.py
 ```
 
@@ -131,67 +144,57 @@ The login screen will prompt for your Anthropic API key. No `.env` file needed.
 ## Workflow
 
 ```
-Enter machine data (domain, IPs, hostnames, usernames, emails)
+Enter case data (domain, coordinates, hostnames, usernames, emails)
   ↓ mark unavailable fields as "absent"
-Auto-runs: WHOIS + CNPJ lookup
+Auto-runs: WHOIS + corporate registry lookup
   ↓
-Claude searches the web for social media + public presence
+Choose analysis mode: internal only OR web search
   ↓
-Generates: Google Dork queries + verification links
+Claude cross-correlates all evidence, decodes names, validates domain
   ↓
-You investigate manually using the generated queries
-  ↓
-Paste additional findings into the form
-  ↓
-Claude analyzes all evidence
+Paste additional OSINT findings into the form
   ↓
 Output: APPROVED / REJECTED / INCONCLUSIVE
-        + Confidence + Reasons + Social media found + Source log
+        + Corroboration map + Reasons + Source log
   ↓
 Download .txt → paste into Gemini → generate final dossier
 ```
 
 ---
 
-## Approval / Rejection Criteria
-
-**APPROVED** when:
-- Valid actionable domain associated with a real, identifiable entity
-- Recent events classified as "Unlicensed" (post-2022)
-- Geolocation coordinates consistent with the entity's registered address
-- Hostname or username directly linked to the company
-
-**REJECTED** when (any one is sufficient):
-- Last event older than required (before 2022)
-- Email domain / computer domain mismatch
-- Last events classified as Commercial, Evaluation, or Personal
-
----
-
 ## Roadmap
 
-- [ ] Auto-scrape LinkedIn company page (name, address, headcount)
-- [ ] Hunter.io / Apollo.io free API integration for contact discovery
-- [ ] Export verdict directly to dossier-ready `.docx`
-- [ ] Batch processing: run multiple machine IDs at once
+- [ ] ipinfo.io integration (IP address → real city coordinates)
+- [ ] Hunter.io free tier for additional email validation
 - [ ] Case history log (SQLite)
+- [ ] Multi-user login with shared API key
+- [ ] Export to `.docx` dossier format
+- [ ] Batch processing for multiple cases
 
 ---
 
 ## Changelog
 
+### v1.2.0
+- Added web search On/Off toggle in sidebar (internal analysis vs. web-assisted)
+- Added domain validation: generic/shared domains (Gmail, Outlook, etc.) flagged and lean toward rejection unless publicly corroborated
+- Added rejection criterion: entity with no verifiable phone AND no verifiable email → REJECTED
+- Added approval exception: no corporate registration but active verifiable social media → may still be APPROVED
+- Added "Company Website" field; defaults to database source URL if no site or social media found
+- Additional case emails now explicitly restricted to name corroboration only (documented in system prompt and analyst notes)
+- Last event date field changed to year-only selector (only relevant granularity for investigators)
+- Updated README: removed internal platform terminology, added full approval/rejection logic
+
 ### v1.1.0
 - Added real-time API usage counter (tokens + estimated cost) in sidebar
-- Added "Mark as absent" checkbox for IP, Wi-Fi, hostname, username, and email fields
+- Added "Mark as absent" checkbox for optional fields
 - IP and Wi-Fi location fields now accept coordinates (latitude, longitude)
-- Machine IDs, hostnames, and usernames now support multiple comma-separated values
-- Claude now searches the web autonomously for social media and public presence
-- Social media found by Claude is merged (deduplicated) with manually entered links in the export
-- .txt export now includes API usage stats per investigation
+- Entity IDs, hostnames, and usernames now support multiple comma-separated values
+- Added name token correlation and email handle decoding to investigation logic
 - "New Case" button clears all fields without page reload
 
 ### v1.0.0
-- Initial release: WHOIS + CNPJ auto-lookup, Google Dork generation, Claude verdict, .txt export
+- Initial release: WHOIS + corporate registry auto-lookup, Google Dork generation, Claude verdict, .txt export
 
 ---
 

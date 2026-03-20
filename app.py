@@ -104,6 +104,7 @@ for key, default in {
     "session_input_tokens": 0,
     "session_output_tokens": 0,
     "session_investigations": 0,
+    "web_search_enabled": False,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -204,6 +205,19 @@ Est. cost      : <b style='color:#56d364'>${cost_usd:.4f} USD</b>
         st.session_state.session_output_tokens = 0
         st.session_state.session_investigations = 0
         st.rerun()
+
+    st.markdown("---")
+    st.markdown('<div class="section-title">⚙️ Analysis Mode</div>', unsafe_allow_html=True)
+    web_search_on = st.toggle(
+        "Web Search",
+        value=st.session_state.web_search_enabled,
+        help="ON: Claude searches the web for social media and public presence (higher token cost). OFF: Internal cross-correlation only (faster, cheaper)."
+    )
+    st.session_state.web_search_enabled = web_search_on
+    if web_search_on:
+        st.caption("🌐 Active · ~$0.15–0.25/case")
+    else:
+        st.caption("⚡ Internal only · ~$0.02/case")
     st.markdown("---")
 
 st.markdown("---")
@@ -297,71 +311,130 @@ def build_quick_links(domain: str, cnpj_raw: str) -> list:
             links.append(("Casa dos Dados", f"https://casadosdados.com.br/solucao/cnpj?q={cnpj}"))
     return links
 
-def score_with_claude(machine_data: dict, whois_data: dict, cnpj_data: dict, additional_findings: str) -> tuple:
+def score_with_claude(machine_data: dict, whois_data: dict, cnpj_data: dict, additional_findings: str, use_web_search: bool = False) -> tuple:
     """
-    Send all evidence to Claude with web_search enabled.
-    Claude will search for social media handles, email addresses, and domain info.
+    Send all evidence to Claude for analysis.
+    use_web_search=True enables autonomous web search (higher cost).
+    use_web_search=False uses internal cross-correlation only (cheaper).
     Returns (text_response, usage_dict).
     """
     client = anthropic.Anthropic(api_key=st.session_state.anthropic_api_key)
 
-    domain    = machine_data.get("email_domain", "")
-    usernames = machine_data.get("usernames", "")
+    domain     = machine_data.get("email_domain", "")
+    usernames  = machine_data.get("usernames", "")
     add_emails = machine_data.get("additional_emails", "")
 
-    system_prompt = """You are a Case Investigation Analyst specializing in software piracy (unlicensed software usage) investigations.
+    # Generic/shared domains that are not proprietary
+    generic_domains = [
+        "gmail.com","yahoo.com","hotmail.com","outlook.com","live.com",
+        "icloud.com","me.com","msn.com","bol.com.br","uol.com.br",
+        "terra.com.br","ig.com.br","globo.com","r7.com",
+        "google.com","microsoft.com","apple.com","amazon.com",
+        "protonmail.com","tutanota.com","zoho.com"
+    ]
+    domain_is_generic = any(domain.lower().endswith(d) for d in generic_domains)
 
-Your job has two phases:
-1. SEARCH PHASE — Use web search to find the entity's social media handles, email addresses, and public web presence for the actionable domain. Look for Instagram, Facebook, LinkedIn, and any other relevant profiles.
-2. ANALYSIS PHASE — Analyze all gathered evidence to determine APPROVED / REJECTED / INCONCLUSIVE.
+    system_prompt = f"""You are a Case Investigation Analyst specializing in software piracy (unlicensed software usage) investigations.
 
-CRITICAL RULES:
-- Only report information you can verify. NEVER invent CNPJs, domains, emails, or identifiers.
-- Every claim must be traceable to a real, public source.
-- If evidence is insufficient, say INCONCLUSIVE — do not guess.
-- Respond in English.
-- Fields marked "Information Absent" mean the data was not available — do not penalize the case for this.
+You receive structured case data from multiple independent sources and must cross-correlate every data point. A data point is accepted as valid only if confirmed by at least one other independent source.
 
-FIELD NOTES:
-- Hostname may be a generic label like "desktop-abc123" — this is normal and not inherently suspicious.
-- Username often reflects the entity name, a partner, architect, or engineer. Multiple usernames may be listed.
-- Multiple Machine IDs may be listed — evaluate each one's classification individually.
-- IP and Wi-Fi locations are provided as coordinates (latitude, longitude).
+{"You also have web search available. Use it to find social media profiles, public mentions, and any public presence tied to the domain, usernames, and email addresses provided." if use_web_search else "You must reason purely from the provided data — do not assume or invent any external information."}
 
-APPROVAL CRITERIA:
-- Valid "Actionable Domain" clearly associated with a real, identifiable entity
-- Recent events classified as "Unlicensed" (post-2022)
-- Geolocation coordinates consistent with the entity's known address
-- Corporate Hostname or Username directly linked to the company
+═══════════════════════════════════════
+ DOMAIN VALIDATION (check first)
+═══════════════════════════════════════
+The actionable domain is: {domain}
+Generic domain detected: {"YES — see rules below" if domain_is_generic else "NO — domain appears proprietary"}
 
-REJECTION CRITERIA (any one is sufficient):
-- Last event timestamp before 2022
-- Email domain / Computer domain mismatch
-- Last events classified as Commercial, Evaluation, or Personal
+PROPRIETARY DOMAIN RULE:
+- A valid actionable domain must be owned/controlled by the entity (e.g. palmarnet.com.br, palaciopontoalto.com.br).
+- Generic/shared email providers (Gmail, Outlook, Yahoo, Hotmail, UOL, BOL, etc.) are NOT valid actionable domains on their own.
+- Exception: a generic domain email MAY be accepted IF it can be found in a public social media profile, news article, or verifiable public record that links it to the entity. {"(Web search is ON — check for this.)" if use_web_search else "(Web search is OFF — mark as UNCONFIRMED if only source is the platform data.)"}
+- If the domain is generic and cannot be publicly corroborated: flag as RED FLAG and lean toward REJECTED.
 
-RESPONSE FORMAT (use this exact structure):
+═══════════════════════════════════════
+ ADDITIONAL EMAIL USAGE RESTRICTION
+═══════════════════════════════════════
+Additional email addresses from the platform data are LEGALLY RESTRICTED:
+- They MAY be used ONLY to corroborate names (match tokens to known partners/registrants).
+- They must NOT be used as contact information in the dossier or as evidence of the entity's reachability.
+- If an additional email contains name fragments that match a known partner or registrant, document this in the corroboration map.
+- Never include additional platform emails in the REASONS or as standalone evidence.
+
+═══════════════════════════════════════
+ NAME & IDENTITY CORRELATION
+═══════════════════════════════════════
+1. Split every name into individual tokens: first, middle, last names.
+2. Compare tokens across ALL sources: WHOIS registrant, CNPJ QSA partners, username, email handle (part before @), additional emails, investigator notes.
+3. A match is PROBABLE if 2+ tokens overlap across sources — even if full names differ.
+4. Email handles encode names in compressed form:
+   - "anamartenicodemos" → [ana][marte][nicodemos] — cross-reference each fragment.
+5. Usernames are often informal versions of a person's name:
+   - "ana marte" + CNPJ partner "ANA PAULA CORNADO MARTE" → shared tokens [ana][marte] → PROBABLE MATCH.
+   - Additional surname segments (e.g. "nicodemos") may be maiden/married names not in corporate record — not a contradiction.
+6. When a PROBABLE identity match is found, document the full reasoning chain.
+
+═══════════════════════════════════════
+ GENERAL CORROBORATION LOGIC
+═══════════════════════════════════════
+- A location is CORROBORATED if IP/Wi-Fi coordinates are geographically consistent with the CNPJ registered address municipality.
+- A domain is CORROBORATED if the WHOIS registrant email domain matches the actionable domain, or CNPJ email matches the domain.
+- A data point present in only one source is UNCONFIRMED — flag it, do not discard unless it contradicts another source.
+- A data point that directly contradicts another source is a RED FLAG.
+- Fields marked "Information Absent" were unavailable — do not penalize the case for missing data.
+- Hostname may be a generic label (desktop-abc123) — not suspicious alone.
+- Multiple entity IDs may be listed — evaluate each one's classification individually.
+- IP and Wi-Fi locations are latitude/longitude coordinates.
+
+═══════════════════════════════════════
+ APPROVAL CRITERIA
+═══════════════════════════════════════
+A case MAY be APPROVED when ALL of the following are true:
+1. Actionable domain is proprietary (owned/controlled by the entity), OR generic domain is publicly corroborated in a social/public source.
+2. At least one of the following contact methods exists and is verifiable: phone number OR official email (not additional platform emails).
+3. Recent events classified as "Unlicensed" (post-2022).
+4. Geolocation consistent with the entity's registered address.
+5. Hostname or username corroborated or probably matched to a known person/entity.
+
+EXCEPTION — No CNPJ but active social media:
+- If no CNPJ is available but the entity has an active, identified social media presence (Instagram, Facebook, LinkedIn, website) that can be publicly verified and linked to the domain, the case MAY still be APPROVED if all other criteria are met. Document this clearly.
+
+═══════════════════════════════════════
+ REJECTION CRITERIA (any one = REJECTED)
+═══════════════════════════════════════
+- Last event before 2022.
+- Email domain / computer domain mismatch (unless explainable).
+- Last events classified as Commercial, Evaluation, or Personal.
+- Generic/shared domain with no public corroboration.
+- Entity has NO verifiable phone number AND NO verifiable official email (platform additional emails do not count).
+
+═══════════════════════════════════════
+ RESPONSE FORMAT (exact — no deviations)
+═══════════════════════════════════════
 ---VERDICT---
 [APPROVED / REJECTED / INCONCLUSIVE]
 
 ---CONFIDENCE---
 [HIGH / MEDIUM / LOW]
 
----REASONS---
-[Bullet points in standard dossier format]
+---CORROBORATION_MAP---
+[For each key data point, one line:
+"Field : value → Source A + Source B → CORROBORATED / PROBABLE MATCH / UNCONFIRMED / RED FLAG"
+For PROBABLE MATCH, include the reasoning chain.]
 
----SOCIAL_MEDIA_FOUND---
-[List social media profiles found via web search with full URLs. Write N/A if none found.]
+---REASONS---
+[Bullet points using only corroborated or probably matched data, standard dossier format]
 
 ---MISSING_EVIDENCE---
-[What would be needed to move from INCONCLUSIVE to APPROVED]
+[Only if INCONCLUSIVE: what specific data would confirm the case]
 
 ---ANALYST_NOTES---
-[Observations, inconsistencies, or flags for QA]
+[Unconfirmed data, identity deductions, domain validity notes, email restrictions applied, QA flags]
 ---"""
 
-    user_message = f"""Investigate this case. Begin by searching the web for the entity's social media presence and public information tied to the domain, usernames, and email addresses below.
+    user_message = f"""{"Search the web first for the entity's social media and public presence, then c" if use_web_search else "C"}ross-correlate all evidence below.
 
-## MACHINE DATA:
+## CASE DATA (platform):
 {json.dumps(machine_data, indent=2, ensure_ascii=False)}
 
 ## WHOIS (source: {whois_data.get('_source_url','N/A')} | verified: {whois_data.get('_verified',False)}):
@@ -370,28 +443,134 @@ RESPONSE FORMAT (use this exact structure):
 ## CNPJ (source: {cnpj_data.get('_source_url','N/A')} | verified: {cnpj_data.get('_verified',False)}):
 {json.dumps({k: v for k, v in cnpj_data.items() if not k.startswith('_')}, indent=2, ensure_ascii=False)}
 
-## ADDITIONAL FINDINGS (investigator notes):
+## INVESTIGATOR FINDINGS:
 {additional_findings if additional_findings else "None provided."}
 
-Please search for:
-- Social media handles for domain: {domain}
-- Public profiles for usernames: {usernames}
-- Contact info for additional emails: {add_emails}
+Provide your full analysis using the required format."""
 
-Then provide your full verdict using the required format."""
+    create_kwargs = dict(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1200,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}]
+    )
+    if use_web_search:
+        create_kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
+
+    response = client.messages.create(**create_kwargs)
+
+    if use_web_search:
+        text_parts = [block.text for block in response.content if hasattr(block, "text")]
+        full_text = "\n".join(text_parts)
+    else:
+        full_text = response.content[0].text
+
+    usage = {
+        "input_tokens":  response.usage.input_tokens,
+        "output_tokens": response.usage.output_tokens,
+    }
+    return full_text, usage
+
+    system_prompt = """You are a Case Investigation Analyst specializing in software piracy (unlicensed software usage) investigations.
+
+You receive structured case data from multiple independent sources: the platform's machine data, a WHOIS lookup, a CNPJ registry lookup, and the investigator's manual findings. Your job is to cross-correlate every piece of information — a data point is only accepted as valid if confirmed by at least one other independent source within the data provided.
+
+═══════════════════════════════════════
+ NAME & IDENTITY CORRELATION (critical)
+═══════════════════════════════════════
+People appear across multiple sources with partial, informal, or married/maiden name variations. You must actively attempt to match them.
+
+RULES:
+1. Split every name into individual tokens: first name, middle name(s), last names.
+2. Compare tokens across ALL sources: WHOIS registrant, CNPJ QSA partners, username, email handle (the part before @), additional emails, investigator notes.
+3. A match is PROBABLE if 2 or more tokens overlap across sources — even if the full name differs.
+4. Email handles often encode names in compressed form:
+   - "anamartenicodemos" likely encodes "ana" + "marte[s/z]" + "nicodemos" — each segment is a name fragment.
+   - Cross-reference each fragment against known names from WHOIS and CNPJ.
+5. Usernames are often informal versions of the person's name:
+   - "ana marte" as a username, combined with CNPJ partner "ANA PAULA CORNADO MARTE" → the shared tokens "ana" + "marte" make this a PROBABLE match.
+   - "nicodemos" in the email handle may be a maiden name or married name not present in the corporate record — this does not invalidate the match, it enriches it.
+6. Hostnames may encode informal nicknames, company abbreviations, or owner references — check for substring overlap with company name and partner names.
+7. When a PROBABLE identity match is found, document the reasoning chain explicitly:
+   - "Username 'ana marte' shares tokens [ana, marte] with CNPJ partner 'ANA PAULA CORNADO MARTE' → PROBABLE MATCH. Email handle 'anamartenicodemos' encodes [ana][marte][nicodemos] — 'nicodemos' is likely a second surname not present in corporate record → does not contradict, consistent with same individual."
+
+═══════════════════════════════════════
+ GENERAL CORROBORATION LOGIC
+═══════════════════════════════════════
+- A location is CORROBORATED if IP/Wi-Fi coordinates are geographically consistent with the CNPJ registered address municipality.
+- A domain is CORROBORATED if the WHOIS registrant email domain matches the actionable domain, or CNPJ email matches the domain.
+- A data point present in only one source is UNCONFIRMED — flag it, do not discard unless it contradicts another source.
+- A data point that directly contradicts another source is a RED FLAG — flag it explicitly.
+- Fields marked "Information Absent" were unavailable — do not penalize the case for missing data.
+
+FIELD NOTES:
+- Hostname may be a generic label (desktop-abc123) — not suspicious alone.
+- Username often reflects the entity name, a partner, architect, or engineer.
+- Multiple Machine IDs may be listed — evaluate each one's classification individually.
+- IP and Wi-Fi locations are latitude/longitude coordinates.
+
+═══════════════════════════════════════
+ APPROVAL / REJECTION CRITERIA
+═══════════════════════════════════════
+APPROVED when all of:
+- Valid actionable domain associated with a real, identifiable entity
+- Recent events classified as "Unlicensed" (post-2022)
+- Geolocation consistent with the entity's registered address
+- Hostname or username corroborated or probably matched to a known person/entity
+
+REJECTED when any one of:
+- Last event before 2022
+- Email domain / computer domain mismatch
+- Last events classified as Commercial, Evaluation, or Personal
+
+═══════════════════════════════════════
+ RESPONSE FORMAT (exact — no deviations)
+═══════════════════════════════════════
+---VERDICT---
+[APPROVED / REJECTED / INCONCLUSIVE]
+
+---CONFIDENCE---
+[HIGH / MEDIUM / LOW]
+
+---CORROBORATION_MAP---
+[For each key data point, one line:
+"Field : value → Source A + Source B → CORROBORATED / PROBABLE MATCH / UNCONFIRMED / RED FLAG"
+For PROBABLE MATCH, include the reasoning chain.]
+
+---REASONS---
+[Bullet points using only corroborated or probably matched data, in standard dossier format]
+
+---MISSING_EVIDENCE---
+[Only if INCONCLUSIVE: what specific data would confirm the case]
+
+---ANALYST_NOTES---
+[Unconfirmed data points, identity deductions, maiden/married name notes, QA flags]
+---"""
+
+    user_message = f"""Cross-correlate all the evidence below. Do not search the web — reason only from the data provided. For each key data point, identify whether it is corroborated, unconfirmed, or contradicted by another source.
+
+## MACHINE DATA (platform):
+{json.dumps(machine_data, indent=2, ensure_ascii=False)}
+
+## WHOIS LOOKUP (source: {whois_data.get('_source_url','N/A')} | verified: {whois_data.get('_verified',False)}):
+{json.dumps({k: v for k, v in whois_data.items() if not k.startswith('_')}, indent=2, ensure_ascii=False)}
+
+## CNPJ LOOKUP (source: {cnpj_data.get('_source_url','N/A')} | verified: {cnpj_data.get('_verified',False)}):
+{json.dumps({k: v for k, v in cnpj_data.items() if not k.startswith('_')}, indent=2, ensure_ascii=False)}
+
+## INVESTIGATOR FINDINGS (manual OSINT):
+{additional_findings if additional_findings else "None provided."}
+
+Provide your full analysis using the required format."""
 
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=1500,
+        max_tokens=1200,
         system=system_prompt,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": user_message}]
     )
 
-    # Extract all text blocks (Claude interleaves tool_use and text blocks)
-    text_parts = [block.text for block in response.content if hasattr(block, "text")]
-    full_text = "\n".join(text_parts)
-
+    full_text = response.content[0].text
     usage = {
         "input_tokens":  response.usage.input_tokens,
         "output_tokens": response.usage.output_tokens,
@@ -401,12 +580,12 @@ Then provide your full verdict using the required format."""
 def parse_verdict(raw: str) -> dict:
     sections = {}
     patterns = {
-        "verdict":    r"---VERDICT---\s*(.*?)\s*(?=---|$)",
-        "confidence": r"---CONFIDENCE---\s*(.*?)\s*(?=---|$)",
-        "reasons":    r"---REASONS---\s*(.*?)\s*(?=---|$)",
-        "social":     r"---SOCIAL_MEDIA_FOUND---\s*(.*?)\s*(?=---|$)",
-        "missing":    r"---MISSING_EVIDENCE---\s*(.*?)\s*(?=---|$)",
-        "notes":      r"---ANALYST_NOTES---\s*(.*?)\s*(?=---|$)",
+        "verdict":        r"---VERDICT---\s*(.*?)\s*(?=---|$)",
+        "confidence":     r"---CONFIDENCE---\s*(.*?)\s*(?=---|$)",
+        "corroboration":  r"---CORROBORATION_MAP---\s*(.*?)\s*(?=---|$)",
+        "reasons":        r"---REASONS---\s*(.*?)\s*(?=---|$)",
+        "missing":        r"---MISSING_EVIDENCE---\s*(.*?)\s*(?=---|$)",
+        "notes":          r"---ANALYST_NOTES---\s*(.*?)\s*(?=---|$)",
     }
     for key, pattern in patterns.items():
         match = re.search(pattern, raw, re.DOTALL)
@@ -434,7 +613,11 @@ with col_left:
             ["Unlicensed", "Commercial", "Evaluation", "Personal", "Unknown"],
             key=f"event_class_{v}"
         )
-        last_event_date = st.date_input("Last Event Date", key=f"last_event_{v}")
+        last_event_year = st.selectbox(
+            "Last Event Year",
+            options=list(range(datetime.utcnow().year, 2018, -1)),
+            key=f"last_event_{v}"
+        )
 
     with st.expander("**Network & Identity Data**", expanded=True):
         email_domain = st.text_input(
@@ -491,6 +674,13 @@ with col_left:
         )
 
     st.markdown('<div class="section-title" style="margin-top:16px;">📝 Additional Findings</div>', unsafe_allow_html=True)
+
+    company_website = st.text_input(
+        "Company Website (if found)",
+        placeholder="https://www.palaciopontoalto.com.br or https://www.cadastroempresa.com.br/...",
+        key=f"website_{v}",
+        help="If no official website exists, paste the CNPJ database link where the entity was found (Cadastro Empresa, Casa dos Dados, CNPJ Já, etc.)"
+    )
 
     social_media_links = st.text_area(
         "Social Media Links found manually (one per line)",
@@ -574,21 +764,23 @@ if run_btn:
 
             # 3. Machine data dict
             machine_data = {
-                "machine_ids":              machine_ids,
-                "event_classification":     event_classification,
-                "last_event_date":          str(last_event_date),
-                "email_domain":             email_domain,
-                "ip_location_coordinates":  ip_location,
+                "case_ids":                  machine_ids,
+                "event_classification":      event_classification,
+                "last_event_year":           str(last_event_year),
+                "email_domain":              email_domain,
+                "ip_location_coordinates":   ip_location,
                 "wifi_location_coordinates": wifi_location,
-                "hostnames":                hostname,
-                "usernames":                username,
-                "additional_emails":        additional_emails,
+                "hostnames":                 hostname,
+                "usernames":                 username,
+                "additional_emails_note":    f"FOR NAME CORROBORATION ONLY (not usable as contact): {additional_emails}" if additional_emails and additional_emails != "Information Absent" else additional_emails,
             }
 
-            # 4. Claude (with web search)
-            claude_status = st.status("🔍 Claude is investigating (web search enabled)...", expanded=False)
+            # 4. Claude analysis
+            use_ws = st.session_state.web_search_enabled
+            ws_label = "🌐 Claude investigating with web search..." if use_ws else "🔍 Claude cross-correlating evidence..."
+            claude_status = st.status(ws_label, expanded=False)
             try:
-                raw_verdict, usage = score_with_claude(machine_data, whois_data, cnpj_data, additional_findings)
+                raw_verdict, usage = score_with_claude(machine_data, whois_data, cnpj_data, additional_findings, use_web_search=use_ws)
                 parsed = parse_verdict(raw_verdict)
 
                 # Update session counters
@@ -616,9 +808,9 @@ if run_btn:
                     st.markdown("**Reasons:**")
                     st.markdown(parsed["reasons"])
 
-                if parsed.get("social") and parsed["social"].upper() != "N/A":
-                    st.markdown("**🔗 Social Media Found by Claude:**")
-                    st.info(parsed["social"])
+                if parsed.get("corroboration"):
+                    with st.expander("🔗 Corroboration Map — how data points were validated"):
+                        st.code(parsed["corroboration"], language="markdown")
 
                 if parsed.get("missing") and verdict == "INCONCLUSIVE":
                     st.markdown("**Missing Evidence:**")
@@ -630,11 +822,12 @@ if run_btn:
 
                 st.markdown("---")
                 st.markdown('<div class="section-title">🔐 Source Transparency Log</div>', unsafe_allow_html=True)
+                analysis_mode = "Web search enabled · Claude searched autonomously" if use_ws else "Internal cross-correlation · No external search"
                 st.markdown(f"""
 <div class="info-block">
 <span class="source-tag">WHOIS</span> <a href="{whois_data.get('_source_url','#')}" target="_blank" style="color:#58a6ff">{whois_data.get('_source_url','N/A')}</a> | Verified: {whois_data.get('_verified',False)}<br>
 <span class="source-tag">CNPJ</span> <a href="{cnpj_data.get('_source_url','#')}" target="_blank" style="color:#58a6ff">{cnpj_data.get('_source_url','N/A')}</a> | Verified: {cnpj_data.get('_verified',False)}<br>
-<span class="source-tag">Web Search</span> Enabled · Claude searched autonomously<br>
+<span class="source-tag">Analysis</span> {analysis_mode}<br>
 <span class="source-tag">Generated</span> {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
 </div>
 """, unsafe_allow_html=True)
@@ -672,15 +865,13 @@ if run_btn:
                     whois_contact = ", ".join(whois_contact)
                 whois_source_url = whois_data.get("_source_url","N/A")
 
-                # Merge manual + Claude-found social media (deduplicated)
-                all_social = []
-                if social_media_links.strip():
-                    all_social += [l.strip() for l in social_media_links.strip().split("\n") if l.strip()]
-                if parsed.get("social") and parsed["social"].upper() != "N/A":
-                    for line in parsed["social"].split("\n"):
-                        line = line.strip("- ").strip()
-                        if line and line not in all_social:
-                            all_social.append(line)
+                # Social media — manual entries only
+                all_social = [l.strip() for l in social_media_links.strip().split("\n") if l.strip()] if social_media_links.strip() else []
+
+                # Company website — use CNPJ source URL as fallback if no website or social
+                effective_website = company_website.strip() if company_website.strip() else (
+                    all_social[0] if all_social else cnpj_source_url
+                )
 
                 export_lines = [
                     f"the new investigation is {email_domain}",
@@ -688,6 +879,8 @@ if run_btn:
                     f"here's the whois results: {whois_source_url}",
                     f"Titular Name    : {whois_registrant}",
                     f"Titular Contact : {whois_contact}",
+                    "",
+                    f"company website: {effective_website}",
                     "",
                     "company social media links:",
                 ]
